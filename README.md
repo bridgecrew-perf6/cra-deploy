@@ -141,3 +141,133 @@ services:
 
 1. 单页应用多路由配置
 1. 单页应用多缓存策略
+
+
+# 单页应用多路由与持久缓存优化
+## 路由
+使用`react-router-dom`添加路由，`/src/index.js`代码如下
+```jsx
+
+import ReactDOM from 'react-dom/client'
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Link
+} from 'react-router-dom'
+
+const root = ReactDOM.createRoot(document.getElementById('root'))
+
+root.render(
+  <BrowserRouter>
+    <Routes>
+      <Route path='/' element={<Home />} />
+      <Route path='/about' element={<About />} />
+    </Routes>
+  </BrowserRouter>
+)
+
+function Home() {
+  return (
+    <div>
+      <h1>当前在 Home 页面</h1>
+      <Link to='/about'>About</Link>
+    </div>
+  )
+}
+
+function About() {
+  return (
+    <div>
+      <h1>当前在 About 页面</h1>
+      <Link to='/'>Home</Link>
+    </div>
+  )
+}
+```
+重新部署
+```bash
+$ docker-compose up --build simple
+```
+直接访问 [http://localhost:4000/about](http://localhost:4000/about) 会显示404页面
+![image.png](https://cdn.nlark.com/yuque/0/2022/png/1081923/1655874153566-2c9e2fb0-9ee0-4583-be32-b2744c99efa9.png#clientId=u2ea038aa-1558-4&crop=0&crop=0&crop=1&crop=1&from=paste&height=123&id=u11fcef21&margin=%5Bobject%20Object%5D&name=image.png&originHeight=181&originWidth=497&originalType=binary&ratio=1&rotation=0&showTitle=false&size=10611&status=done&style=none&taskId=ub90f9fa5-63b1-4f03-a68d-0ebc634f47f&title=&width=338.5)
+这是因为**在静态资源中并没有**`**about**`**或者**`**about.html**`**资源。因此返回**`**404 Not Found**`**。而在单页应用中，**`**/about**`**是由前端通过**`**history API**`**进行控制的。**
+解决方法：**在服务端将所有页面路由均指向**`**index.html**`**，而单页应用再通过**`**history API**`**控制当前路由显示哪个页面。**这也是静态资源服务器的重写（`Rewrite`）功能。
+我们在使用 nginx 镜像部署前端应用时，可通过挂载 nginx 配置解决该问题。
+## nginx 的 try_file 指令
+在 nginx 中，可通过 try_files 指令将所有页面导向`index.html`。
+```nginx
+location / {
+  # 如果资源不存在，则回退到 index.html
+  try_files $uri $uri/ /index.html;
+}
+```
+这样就解决了服务器端路由的问题
+## 长期缓存
+在CRA应用中，`./build/static`目录均由 webpack 构建产生，资源路径将会带有 hash 值。
+此时可通过`expires`对它们配置一年的长期缓存，实际上是配置了`Cache-Control:max-age=31536000`的相应头。
+```nginx
+location /static {
+  expires 1y;
+}
+```
+## nginx 配置文件
+总结缓存策略如下：
+
+1. 带有 hash 的资源一年长期缓存
+1. 非带 hash 的资源，需配置 Cache-Control: no-cache，避免浏览器默认为强缓存
+
+`nginx.conf`文件需要维护在项目当中，最终配置如下：
+```nginx
+server {
+    listen       80;
+    server_name  localhost;
+
+    root   /usr/share/nginx/html;
+    index  index.html index.htm;
+
+    location / {
+        # 解决单页应用服务端路由的问题
+        try_files  $uri $uri/ /index.html;  
+
+        # 非带 hash 的资源，需要配置 Cache-Control: no-cache，避免浏览器默认为强缓存
+        expires -1;
+    }
+
+    location /static {
+        # 带 hash 的资源，需要配置长期缓存
+        expires 1y;
+    }
+}
+```
+## Dockerfile 配置文件
+在 Dockerfile 部署过程中，需要将`nginx.conf`置于镜像中。
+修改`router.Dockerfile`配置文件如下：
+```dockerfile
+FROM node:14-alpine as builder
+
+WORKDIR /code
+
+# 单独分离 package.json，是为了 yarn 可最大限度利用缓存
+ADD package.json yarn.lock /code/
+RUN yarn
+
+#  单独分离 public/src，是为了避免 ADD . /code 时，因 README.md/nginx.conf 的更改导致缓存失效
+# 也是为了 npm run build 可最大限度利用缓存
+ADD public /code/public
+ADD src /code/src
+RUN npm run build
+
+# 选择更小体积的基础镜像
+FROM nginx:alpine
+# 使用项目中的 nginx.conf 作为 nginx 的配置文件
+ADD nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder code/build /usr/share/nginx/html
+```
+## 校验长期缓存配置
+访问 [http://localhost:3000(opens new window)](http://localhost:3000/)页面，打开浏览器控制台网络面板。
+此时对于**带有** hash 资源， Cache-Control: max-age=31536000 响应头已配置。
+此时对于**非带** hash 资源， Cache-Control: no-cache 响应头已配置。
+![image.png](https://cdn.nlark.com/yuque/0/2022/png/1081923/1655879426931-9dae3040-992e-4ab5-9f28-e6998f628e9a.png#clientId=u2ea038aa-1558-4&crop=0&crop=0&crop=1&crop=1&from=paste&height=241&id=u7713bb00&margin=%5Bobject%20Object%5D&name=image.png&originHeight=332&originWidth=668&originalType=binary&ratio=1&rotation=0&showTitle=false&size=66702&status=done&style=none&taskId=u95c382ae-ad5b-4d2b-a9a3-72d8e90406a&title=&width=484)
+
+至此，我们的单页面应用部署就完成了。
