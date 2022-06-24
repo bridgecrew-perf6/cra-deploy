@@ -6,6 +6,8 @@
     "@testing-library/jest-dom": "^5.16.4",
     "@testing-library/react": "^13.3.0",
     "@testing-library/user-event": "^13.5.0",
+    "ali-oss": "^6.17.1",
+    "p-queue": "^7.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "6",
@@ -16,7 +18,9 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "oss:cli": "ossutil cp -rf --meta Cache-Control:no-cache build oss://junjiang-cra/ && ossutil cp -rf --meta Cache-Control:max-age=31536000 build/static oss://junjiang-cra/static",
+    "oss:script": "node scripts/uploadOSS.mjs"
   },
   "eslintConfig": {
     "extends": [
