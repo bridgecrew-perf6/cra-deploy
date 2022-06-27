@@ -274,9 +274,7 @@ COPY --from=builder code/build /usr/share/nginx/html
 
 至此，我们的单页面应用部署就完成了。
 
-
-# 将静态资源部署在OSS_CDN
-
+# 将静态资源部署在 OSS/CDN
 购买 [👉 OSS](https://oss.console.aliyun.com/overview)，很便宜，5块钱半年。
 我们将静态资源上传至 OSS，并对 OSS 提供 CDN 服务。仍以上一节的项目为示例，并将静态资源上传至 OSS 。
 ## OSS 云服务之前的准备
@@ -285,6 +283,26 @@ COPY --from=builder code/build /usr/share/nginx/html
 拿到 AccessKey 相关信息以后可以将其设置成自己的环境变量。[👉 点击看环境变量更多信息](https://q.shanyue.tech/command/env.html)
 ```bash
 export ACCESS_KEY_ID=你的AccessKey ID ACCESS_KEY_SECRET=你的AccessKey Secret
+```
+> 上面执行后只能在当前 shell 窗口中使用
+> 如果你想要永久有效，执行
+
+**如果需要使得配置的环境变量永久有效，需要写入 ~/.bashrc 或者 ~/.zshrc**
+```bash
+# 判断当前是哪个 shell
+# 如果是 zsh，写入 ~/.zshrc
+# 如果是 bash，写入 ~/.bashrc
+$ echo $SHELL
+/bin/zsh
+
+# 写入 ~/.zshrc，如果不存在该文件，请新建
+$ vim ~/.zshrc
+
+# 写入变量
+export ACCESS_KEY_ID=你的AccessKey ID ACCESS_KEY_SECRET=你的AccessKey Secret
+
+写入后记得使它生效，或者重开一个 shell 窗口
+$ source ~/.zshrc
 ```
 ### Bucket
 Bucket 是 OSS 中的存储空间。**对于生产环境，可对每一个项目创建单独的 Bucket**，而在测试环境，多个项目可共用 Bucket。
@@ -321,7 +339,7 @@ $ ossutil config -i $ACCESS_KEY_ID -k $ACCESS_KEY_SECRET -e $ENDPOINT
 我们可以使用命令`ossutil cp`将本地资源上传至 OSS。同时缓存策略与上一节保持一致：
 
 1. 带有 hash 的资源一年长期缓存
-1. 非带 hash 的资源，需要配置 Cache-Control: no-cache，避免浏览器默认为强缓存。
+2. 非带 hash 的资源，需要配置 Cache-Control: no-cache，避免浏览器默认为强缓存。
 ```bash
 # 将本地目录 build 上传到 Bucket oss://你的Bucket名 中
 # --meta: 配置响应头，也就是这里的缓存策略
@@ -346,8 +364,8 @@ $ ossutil cp -rf --meta Cache-Control:max-age=31536000 build/static oss://这里
 另外也可以通过官方提供的SDK：ali-oss 来上传
 
 1. 对每一条资源进行精准控制
-1. 仅仅上传变更的文件
-1. 使用 p-queue 控制 N 个资源同时上传
+2. 仅仅上传变更的文件
+3. 使用 p-queue 控制 N 个资源同时上传
 
 添加脚本命令
 ```json
@@ -358,6 +376,123 @@ $ ossutil cp -rf --meta Cache-Control:max-age=31536000 build/static oss://这里
 }
 ```
 添加脚本`script/uploadOSS.js`
+```javascript
+port OSS from 'ali-oss'
+import { createReadStream } from 'fs'
+import { resolve } from 'path'
+import readdirp from 'readdirp'
+
+
+const client = new OSS({
+  region: 'oss-cn-hangzhou', // Endpoint（地域节点）取自 oss-cn-hangzhou.aliyuncs.com 
+  accessKeyId: process.env.ACCESS_KEY_ID, // 通过变量传入
+  accessKeySecret: process.env.ACCESS_KEY_SECRET,
+  bucket: 'junjiang-cra' // 自己的 bucket
+})
+
+
+// objectName: static/css/main.079c3a.css
+// withHash: 该文件名是否携带 hash 值
+async function uploadFile (objectName, withHash = false) {
+  const file = resolve('./build', objectName)
+		// 带 hash 的缓存一年，否则设置为 no-cache
+    const cacheControl = withHash ? 'max-age=31536000' : 'no-cache'
+    // 为了加速传输速度，这里使用 stream
+    await client.putStream(objectName, createReadStream(file), {
+      headers: {
+        'Cache-Control': cacheControl
+      }
+    })
+    console.log(`Done: ${objectName}`)
+}
+
+async function main() {
+  // 首先上传不带 hash 的文件
+  for await (const entry of readdirp('./build', { depth: 0, type: 'files' })) {
+    uploadFile(entry.path)
+  }
+  // 上传携带 hash 的文件
+  for await (const entry of readdirp('./build/static', { type: 'files' })) {
+    uploadFile(`static/${entry.path}`, true)
+  }
+}
+
+main().catch(e => {
+  console.error(e)
+  process.exitCode = 1
+})
+
+```
+我们执行`yarn oss:scripts`也能上传了。
+## Dockerfile 与环境变量
+由于 Dockerfile 是同代码一起进行管理，所以不能将敏感信息（AccessKey等）写入 Dockerfile。所以这里使用 ARG 作为变量传入。而 ARG 可通过 `docker build --build-arg`或者`docker-compose`进行传入。
+```dockerfile
+# /oss.Dockerfile
+
+FROM node:14-alpine as builder
+
+ARG ACCESS_KEY_ID
+ARG ACCESS_KEY_SECRET
+ARG ENDPOINT
+# Bucket 域名
+ENV PUBLIC_URL https://junjiang-cra.oss-cn-hangzhou.aliyuncs.com
+
+WORKDIR /code
+
+# 这个步骤内容跟前面在自己机器上的一样，这里为了更好的缓存，把它放在前边
+RUN wget http://gosspublic.alicdn.com/ossutil/1.7.7/ossutil64 -O /usr/local/bin/ossutil \
+  && chmod 755 /usr/local/bin/ossutil \
+  && ossutil config -i $ACCESS_KEY_ID -k $ACCESS_KEY_SECRET -e $ENDPOINT
+
+ADD package.json yarn.lock /code/
+RUN yarn
+
+ADD . /code
+RUN npm run build && npm run oss:cli
+
+FROM nginx:alpine
+ADD nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder code/build /usr/share/nginx/html
+```
+## docker-compose 配置
+在`docker-compose`配置文件中，通过`build.args`可对`Dockerfile`进行传参。
+而`docker-compose.yaml`同样不能出现敏感数据，此时通过环境变量进行传参，在`build.args`中，默认从宿主机的同名环境变量中取值。（也就是会读取一开始设置的环境变量）
+```yaml
+version: "3"
+services:
+  oss:
+    build:
+      context: .
+      dockerfile: oss.Dockerfile
+      args:
+        # 此处默认从宿主机(host)环境变量中传参，在宿主机中需要提前配置 ACCESS_KEY_ID/ACCESS_KEY_SECRET 环境变量
+        - ACCESS_KEY_ID
+        - ACCESS_KEY_SECRET
+        - ENDPOINT=你的Endpoint
+    ports:
+      - 8000:80
+
+```
+执行`docker-compose`
+```bash
+$ docker-compose up --build oss
+```
+到 OSS中 可以看到资源都上传上去了，说明我们基于 docker 上传静态资源到 oss 中也是成功的
+
+# 静态资源上传与空间优化
+在上一节中，我们的前端项目持续跑了 N 年后，部署了上万次后，可能出现几种情况。
+
+1. 时间过长。如构建后的资源全部上传到对象存储，然而**有些资源内容并未发生变更**，将会导致过多的上传时间。
+2. 冗余资源。**前端每改一行代码，便会生成一个新的资源，而旧资源将会在 OSS 不断堆积，占用额外体积。** 从而导致更多的云服务费用。
+## 静态资源上传优化：按需上传与并发控制
+在前端构建过程中存在无处不在的缓存
+
+1. 当源文件内容未发生更改时，将不会对 Module 重新使用 Loader 等进行重新编译。这是利用了 webpack5 的持久化缓存。
+2. 当源文件内容未发生更改时，构建生成资源的 hash 将不会发生变更。此举有利于 HTTP 的 Long Term Cache。
+
+那对比生成资源的哈希，如未发生变更，则不向 OSS 进行上传操作。**这一步将会提升静态资源上传时间，进而提升每一次前端部署的时间。**
+**对于构建后含有 hash 的资源，对比文件名即可了解资源是否发生变更。**
+**整体代码如下👇**
 ```javascript
 import OSS from 'ali-oss'
 import { createReadStream } from 'fs'
@@ -428,59 +563,71 @@ main().catch(e => {
   process.exitCode = 1
 })
 ```
-执行`yarn oss:scripts`也能上传了
-## Dockerfile 与环境变量
-由于 Dockerfile 是同代码一起进行管理，所以不能将敏感信息（AccessKey等）写入 Dockerfile。所以这里使用 ARG 作为变量传入。而 ARG 可通过 `docker build --build-arg`或者`docker-compose`进行传入。
-```dockerfile
-# /oss.Dockerfile
+在这段代码中我们做了如下优化：
 
-FROM node:14-alpine as builder
+1. 我们利用了`isExistObject`来判断（带hash）资源是否在`OSS`中，如果存在则跳过，否则上传。
+2. 根据是否带有hash值来设置关于缓存的响应头
+3. 通过`p-queue`控制资源上传的并发量。
 
-ARG ACCESS_KEY_ID
-ARG ACCESS_KEY_SECRET
-ARG ENDPOINT
-# Bucket 域名
-ENV PUBLIC_URL https://junjiang-cra.oss-cn-hangzhou.aliyuncs.com
+利用自定义脚本可以做到大部分`yarn oss:cli`做不到的优化效果。
+修改某个文件`yarn build`后执行`yarn oss:script`可以看到只上传了修改的文件以及不带 hash 的文件。
+## Rclone：按需上传
+在我们上一版优化中，不带 hash 的文件无论你修改与否，都会被直接上传，也属于一种浪费，我们可以利用Rclone 来优化，`rsync for cloud storage`。
+Rclone 是实用Go语言编写的一款高性能云文件同步的命令行工具，可理解为更高级的 ossutil。
+它支持以下功能：
 
-WORKDIR /code
+1. 按需复制，每次仅仅复制更改的文件
+2. 断点续传
+3. 压缩传输
 
-# 这个步骤内容跟前面在自己机器上的一样，这里为了更好的缓存，把它放在前边
-RUN wget http://gosspublic.alicdn.com/ossutil/1.7.7/ossutil64 -O /usr/local/bin/ossutil \
-  && chmod 755 /usr/local/bin/ossutil \
-  && ossutil config -i $ACCESS_KEY_ID -k $ACCESS_KEY_SECRET -e $ENDPOINT
-
-ADD package.json yarn.lock /code/
-RUN yarn
-
-ADD . /code
-RUN npm run build && npm run oss:cli
-
-FROM nginx:alpine
-ADD nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=builder code/build /usr/share/nginx/html
-```
-## docker-compose 配置
-在`docker-compose`配置文件中，通过`build.args`可对`Dockerfile`进行传参。
-而`docker-compose.yaml`同样不能出现敏感数据，此时通过环境变量进行传参，在`build.args`中，默认从宿主机的同名环境变量中取值。（也就是会读取一开始设置的环境变量）
-```yaml
-version: "3"
-services:
-  oss:
-    build:
-      context: .
-      dockerfile: oss.Dockerfile
-      args:
-        # 此处默认从宿主机(host)环境变量中传参，在宿主机中需要提前配置 ACCESS_KEY_ID/ACCESS_KEY_SECRET 环境变量
-        - ACCESS_KEY_ID
-        - ACCESS_KEY_SECRET
-        - ENDPOINT=你的Endpoint
-    ports:
-      - 8000:80
-
-```
-执行`docker-compose`
+安装文档在这里[👉 安装文档](https://www.rclone.cn/document/%E5%AE%89%E8%A3%85rclone%E6%96%B9%E6%B3%95/) 。可以根据自己的需求选择安装方式。安装完成以后，需要进行配置，（我们这里选择的是阿里的OSS）根据这个[👉配置文档](https://rclone.org/s3/#alibaba-oss) 进行配置即可。（如果你是其他的存储方式也可以在文档中找到对应的选择方式）
 ```bash
-$ docker-compose up --build oss
+# 将资源上传到 OSS Bucket
+# alioss: 通过 rclone 配置的云存储名称，此处为阿里云的 oss，个人取名为 alioss
+# junjiang-cra: oss 中的 bucket 名称
+$ rclone copy --exclude 'static/**' --header 'Cache-Control: no-cache' build alioss:/junjiang-cra --progress 
+
+# 将带有 hash 资源上传到 OSS Bucket，并且配置长期缓存
+$ rclone copy --header  'Cache-Control: max-age=31536000' build/static alioss:/junjiang-cra/static --progress
 ```
-到 OSS中 可以看到资源都上传上去了，说明我们基于 docker 上传静态资源到 oss 中也是成功的
+将这两条命令维护的到`npm scripts`中
+```json
+{
+  "scripts": {
+    "oss:rclone": "rclone copy --exclude 'static/**' --header 'Cache-Control: no-cache' build alioss:/junjiang-cra --progress && rclone copy --header  'Cache-Control: max-age=31536000' build/static alioss:/junjiang-cra/static --progress"
+  }
+}
+```
+## 删除OSS中冗余资源
+在生产环境中，OSS 只需保留最后一次线上环境所依赖的资源。（多版本共存情况下除外）
+此时可根据 OSS 中所有资源与最后一次构建生成的资源一一对比文件名，进行删除。
+```javascript
+async function getCurrentFiles() {
+  // ...
+}
+
+async function getAllObjects() {
+  // ...
+}
+
+async function main() {
+  const files = await getCurrentFiles()
+  const objects = await getAllObjects()
+  for (const object of objects) {
+    if (!files.includes(object.name)) {
+      await client.delete(object.name)
+      console.log(`Delete: ${object.name}`)
+    }
+  }
+}
+```
+维护到`npm scripts`中
+```json
+{
+  "scripts": {
+    "oss:prune": "node scripts/deleteOSS.mjs"
+  }
+}
+```
+那么每次部署完以后执行这个命令将多余的文件删除掉即可。
 

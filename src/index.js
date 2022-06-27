@@ -23,6 +23,7 @@ import {
   Route,
   Link
 } from 'react-router-dom'
+import App from './App'
 
 const root = ReactDOM.createRoot(document.getElementById('root'))
 
@@ -38,8 +39,9 @@ root.render(
 function Home() {
   return (
     <div>
-      <h1>当前在 Home 页面</h1>
-      <Link to='/about'>About</Link>
+      <h1>当前在 Home 页面 </h1>
+      <Link to='/about'>A bout</Link>
+      <App />
     </div>
   )
 }
@@ -47,7 +49,7 @@ function Home() {
 function About() {
   return (
     <div>
-      <h1>当前在 About 页面</h1>
+      <h1>当前在 About 页面 </h1>
       <Link to='/'>Home</Link>
     </div>
   )
